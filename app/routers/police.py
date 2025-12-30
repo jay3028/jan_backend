@@ -998,7 +998,7 @@ async def search_worker_by_face(
                 "worker_internal_id": worker.id,
                 "worker_id": worker.worker_id,
                 "full_name": user.full_name if user else "Unknown",
-                "mobile_number": user.mobile_number if user else "Unknown",
+                "mobile_number": user.mobile if user else "Unknown",
                 "category": worker.category.value if worker.category else "Unknown",
                 "verification_status": worker.verification_status.value if worker.verification_status else "Unknown",
                 "status": worker.status.value if worker.status else "Unknown",
