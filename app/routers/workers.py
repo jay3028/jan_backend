@@ -440,13 +440,13 @@ def get_worker_profile_data(current_user: User, db: Session):
     
     print(f"[WORKER] Profile found - Internal ID: {worker.id}, Official Worker ID: {worker.worker_id}, Category: {worker.category}, Step: {worker.onboarding_step}")
     
-    # Determine what to show as Worker ID
-    if worker.worker_id:
-        # Official Worker ID exists (police verified)
+    # Determine what to show as Worker ID - ONLY show if police verified
+    if worker.verification_status == VerificationStatus.VERIFIED and worker.worker_id:
+        # Official Worker ID exists AND police verified
         display_worker_id = worker.worker_id
         worker_id_status = "verified"
     elif worker.onboarding_step == 6 and worker.status == WorkerStatus.PENDING_VERIFICATION:
-        # Onboarding complete, waiting for police
+        # Onboarding complete, waiting for police verification
         display_worker_id = "Pending Verification"
         worker_id_status = "pending"
     else:

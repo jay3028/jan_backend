@@ -42,6 +42,16 @@ async def verify_worker(
             detail="Worker not found"
         )
     
+    # Get latest verification to check if worker is verified
+    from app.models import PoliceVerification, VerificationStatus
+    
+    # Only allow public verification for police-verified workers
+    if worker.verification_status != VerificationStatus.VERIFIED or not worker.worker_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Worker verification is pending. Worker ID not yet assigned."
+        )
+    
     # Get user details
     user = db.query(User).filter(User.id == worker.user_id).first()
     
@@ -52,8 +62,7 @@ async def verify_worker(
         if company:
             company_name = company.company_name
     
-    # Get latest verification
-    from app.models import PoliceVerification, VerificationStatus
+    # Get latest verification (already imported PoliceVerification above)
     latest_verification = db.query(PoliceVerification).filter(
         PoliceVerification.worker_id == worker.id,
         PoliceVerification.status == VerificationStatus.VERIFIED

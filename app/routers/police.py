@@ -22,13 +22,163 @@ from app.auth import generate_worker_id
 router = APIRouter(prefix="/police", tags=["Police"])
 
 
+@router.get("/stats")
+@router.get("/statistics")
+async def get_police_statistics(
+    officer: PoliceOfficer = Depends(get_current_police_officer),
+    db: Session = Depends(get_db)
+):
+    """Get dashboard statistics"""
+    print(f"\n[POLICE] Statistics requested by officer ID: {officer.id}")
+    
+    # Count pending verifications (all, not just by this officer)
+    pending_count = db.query(Worker).filter(
+        Worker.status == WorkerStatus.PENDING_VERIFICATION,
+        Worker.verification_status == VerificationStatus.PENDING
+    ).count()
+    
+    # Count approved (verified workers)
+    approved_count = db.query(Worker).filter(
+        Worker.verification_status == VerificationStatus.VERIFIED
+    ).count()
+    
+    # Count rejected workers
+    rejected_count = db.query(Worker).filter(
+        Worker.verification_status == VerificationStatus.REJECTED
+    ).count()
+    
+    # Count total incidents
+    incidents_count = db.query(Incident).count()
+    
+    print(f"[POLICE] Stats - Pending: {pending_count}, Approved: {approved_count}, Rejected: {rejected_count}, Incidents: {incidents_count}")
+    
+    return {
+        "pending": pending_count,
+        "approved": approved_count,
+        "rejected": rejected_count,
+        "incidents": incidents_count
+    }
+
+
+@router.get("/me")
+async def get_police_profile(
+    officer: PoliceOfficer = Depends(get_current_police_officer),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get current police officer profile and stats"""
+    # Get verification statistics
+    total_verifications = db.query(PoliceVerification).filter(
+        PoliceVerification.officer_id == officer.id
+    ).count()
+    
+    verified_count = db.query(PoliceVerification).filter(
+        PoliceVerification.officer_id == officer.id,
+        PoliceVerification.status == VerificationStatus.VERIFIED
+    ).count()
+    
+    rejected_count = db.query(PoliceVerification).filter(
+        PoliceVerification.officer_id == officer.id,
+        PoliceVerification.status == VerificationStatus.REJECTED
+    ).count()
+    
+    # Get recent verifications
+    recent_verifications = db.query(PoliceVerification).filter(
+        PoliceVerification.officer_id == officer.id
+    ).order_by(PoliceVerification.created_at.desc()).limit(10).all()
+    
+    recent_list = []
+    for v in recent_verifications:
+        worker = db.query(Worker).filter(Worker.id == v.worker_id).first()
+        user = db.query(User).filter(User.id == worker.user_id).first() if worker else None
+        
+        # Only show worker_id if verified
+        display_worker_id = None
+        if worker and v.status == VerificationStatus.VERIFIED and worker.worker_id:
+            display_worker_id = worker.worker_id
+        else:
+            display_worker_id = "Pending Verification"
+        
+        recent_list.append({
+            "id": v.id,
+            "worker_name": user.full_name if user else "Unknown",
+            "worker_id": display_worker_id,
+            "status": v.status.value,
+            "verification_date": v.verification_date.isoformat() if v.verification_date else None,
+            "face_match_score": v.face_match_score
+        })
+    
+    return {
+        "officer": {
+            "id": officer.id,
+            "officer_id": officer.officer_id,
+            "name": current_user.full_name,
+            "email": current_user.email,
+            "station_code": officer.station_code,
+            "station_name": officer.station_name,
+            "district": officer.district,
+            "state": officer.state,
+            "rank": officer.rank
+        },
+        "statistics": {
+            "total_verifications": total_verifications,
+            "verified": verified_count,
+            "rejected": rejected_count,
+            "pending": total_verifications - verified_count - rejected_count
+        },
+        "recent_verifications": recent_list
+    }
+
+
+@router.put("/profile")
+async def update_police_profile(
+    data: dict,
+    officer: PoliceOfficer = Depends(get_current_police_officer),
+    db: Session = Depends(get_db)
+):
+    """Update police officer profile (station, rank, etc.)"""
+    print(f"\n[POLICE] Profile update requested by officer ID: {officer.id}")
+    
+    # Update allowed fields
+    if "station_code" in data:
+        officer.station_code = data["station_code"]
+    if "station_name" in data:
+        officer.station_name = data["station_name"]
+    if "district" in data:
+        officer.district = data["district"]
+    if "state" in data:
+        officer.state = data["state"]
+    if "rank" in data:
+        officer.rank = data["rank"]
+    if "officer_id" in data:
+        officer.officer_id = data["officer_id"]
+    
+    db.commit()
+    db.refresh(officer)
+    print(f"[POLICE] Profile updated - Officer ID: {officer.officer_id}")
+    
+    return {
+        "success": True,
+        "message": "Profile updated successfully",
+        "officer": {
+            "id": officer.id,
+            "officer_id": officer.officer_id,
+            "station_code": officer.station_code,
+            "station_name": officer.station_name,
+            "district": officer.district,
+            "state": officer.state,
+            "rank": officer.rank
+        }
+    }
+
+
 @router.post("/register")
 async def register_police_officer(
     data: dict,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Register police officer profile"""
+    """Register police officer profile (manual registration - deprecated, use signup instead)"""
     # Check if already registered
     existing = db.query(PoliceOfficer).filter(
         PoliceOfficer.user_id == current_user.id
@@ -58,30 +208,60 @@ async def register_police_officer(
 
 
 @router.get("/verification-queue")
+@router.get("/verifications/pending")  # Add alias for frontend compatibility
 async def get_verification_queue(
     officer: PoliceOfficer = Depends(get_current_police_officer),
     db: Session = Depends(get_db)
 ):
-    """Get workers pending verification"""
+    """Get all workers with verification records (pending, approved, rejected)"""
+    print(f"\n[POLICE] Verification queue requested by officer ID: {officer.id}")
+    
+    # Get all workers who have gone through verification process
     workers = db.query(Worker).filter(
-        Worker.status == WorkerStatus.PENDING_VERIFICATION,
-        Worker.verification_status == VerificationStatus.PENDING
+        Worker.onboarding_step == 6  # Completed onboarding
     ).all()
+    
+    print(f"[POLICE] Found {len(workers)} workers for verification queue")
     
     result = []
     for worker in workers:
         user = db.query(User).filter(User.id == worker.user_id).first()
+        
+        # Map worker verification_status to frontend status
+        if worker.verification_status == VerificationStatus.VERIFIED:
+            status = "approved"
+        elif worker.verification_status == VerificationStatus.REJECTED:
+            status = "rejected"
+        else:
+            status = "pending"
+        
+        # Only show worker_id if police verified (security measure)
+        display_worker_id = None
+        if worker.verification_status == VerificationStatus.VERIFIED and worker.worker_id:
+            display_worker_id = worker.worker_id
+        else:
+            display_worker_id = "Pending Verification"
+        
         result.append({
-            "id": worker.id,
-            "worker_id": worker.worker_id,
-            "full_name": user.full_name if user else "Unknown",
-            "category": worker.category.value,
-            "city": worker.city,
-            "state": worker.state,
-            "submitted_at": worker.created_at
+            "id": worker.id,  # Internal ID (use this to fetch details)
+            "worker_id": display_worker_id,  # Official ID (only shown after verification)
+            "status": status,  # Frontend-compatible status field
+            "created_at": worker.updated_at.isoformat() if worker.updated_at else worker.created_at.isoformat(),
+            # Nested worker object for frontend compatibility
+            "worker": {
+                "full_name": user.full_name if user else "Unknown",
+                "mobile": user.mobile if user else "N/A",
+                "email": user.email if user else "N/A",
+                "category": worker.category.value if worker.category else "Unknown",
+                "city": worker.city or "N/A",
+                "state": worker.state or "N/A",
+                "address": worker.address_current or "N/A",
+                "has_selfie": bool(worker.selfie_url),
+                "has_aadhaar": bool(worker.aadhaar_reference),
+            }
         })
     
-    return {"workers": result, "total": len(result)}
+    return {"verifications": result, "total": len(result)}
 
 
 @router.get("/workers/search")
@@ -115,13 +295,106 @@ async def search_workers(
     return {"workers": result}
 
 
+@router.get("/workers/by-id/{internal_id}")
+async def get_worker_by_internal_id(
+    internal_id: int,
+    officer: PoliceOfficer = Depends(get_current_police_officer),
+    db: Session = Depends(get_db)
+):
+    """Get full worker details by internal ID (for pending verification)"""
+    print(f"\n[POLICE] Worker details requested - Internal ID: {internal_id}, Officer: {officer.id}")
+    
+    worker = db.query(Worker).filter(Worker.id == internal_id).first()
+    
+    if not worker:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Worker not found"
+        )
+    
+    user = db.query(User).filter(User.id == worker.user_id).first()
+    
+    # Get verification history
+    verifications = db.query(PoliceVerification).filter(
+        PoliceVerification.worker_id == worker.id
+    ).order_by(PoliceVerification.created_at.desc()).all()
+    
+    # Get complaints
+    from app.models import Complaint
+    complaints = db.query(Complaint).filter(
+        Complaint.worker_id == worker.id
+    ).order_by(Complaint.created_at.desc()).all()
+    
+    print(f"[POLICE] Worker found: {user.full_name if user else 'Unknown'} - Category: {worker.category.value if worker.category else 'N/A'}")
+    
+    # Only show worker_id if police verified (security measure)
+    display_worker_id = None
+    if worker.verification_status == VerificationStatus.VERIFIED and worker.worker_id:
+        display_worker_id = worker.worker_id
+    else:
+        display_worker_id = "Pending Verification"
+    
+    return {
+        "id": worker.id,  # Internal ID
+        "worker_id": display_worker_id,  # Official ID (only shown after verification)
+        "user": {
+            "full_name": user.full_name if user else "Unknown",
+            "email": user.email if user else None,
+            "mobile": user.mobile if user else None
+        },
+        "category": worker.category.value if worker.category else None,
+        "address": worker.address_current,
+        "city": worker.city,
+        "state": worker.state,
+        "pincode": worker.pincode,
+        "aadhaar_reference": worker.aadhaar_reference,
+        "selfie_url": worker.selfie_url,
+        "status": worker.status.value if worker.status else None,
+        "verification_status": worker.verification_status.value if worker.verification_status else None,
+        "risk_score": worker.risk_score,
+        "complaint_count": worker.complaint_count,
+        "onboarding_step": worker.onboarding_step,
+        "onboarding_data": worker.onboarding_data,
+        "submitted_at": worker.updated_at.isoformat() if worker.updated_at else worker.created_at.isoformat(),
+        # AePS specific fields
+        "bank_affiliation": worker.bank_affiliation,
+        "bc_affiliation": worker.bc_affiliation,
+        "aeps_operator_id": worker.aeps_operator_id,
+        "service_region": worker.service_region,
+        "aeps_device_info": worker.aeps_device_info,
+        "transaction_role": worker.transaction_role,
+        # Verification history
+        "verifications": [
+            {
+                "id": v.id,
+                "status": v.status.value,
+                "verification_date": v.verification_date.isoformat() if v.verification_date else None,
+                "officer_id": v.officer_id,
+                "face_match_score": v.face_match_score,
+                "remarks": v.remarks
+            } for v in verifications
+        ],
+        # Complaints
+        "complaints": [
+            {
+                "id": c.id,
+                "complaint_number": c.complaint_number,
+                "category": c.category.value,
+                "title": c.title,
+                "status": c.status.value,
+                "created_at": c.created_at.isoformat()
+            } for c in complaints
+        ]
+    }
+
+
 @router.get("/workers/{worker_id}")
 async def get_worker_details(
     worker_id: str,
     officer: PoliceOfficer = Depends(get_current_police_officer),
     db: Session = Depends(get_db)
 ):
-    """Get full worker details (police access only)"""
+    """Get full worker details by official Worker ID (for verified workers)"""
     worker = db.query(Worker).filter(Worker.worker_id == worker_id).first()
     
     if not worker:
@@ -354,6 +627,42 @@ async def create_verification(
         response["verification_endpoint"] = worker.verification_endpoint
     
     return response
+
+
+@router.get("/incidents")
+async def get_incidents(
+    officer: PoliceOfficer = Depends(get_current_police_officer),
+    db: Session = Depends(get_db)
+):
+    """Get all incidents (for statistics and dashboard)"""
+    print(f"\n[POLICE] Incidents requested by officer ID: {officer.id}")
+    
+    # Get all incidents
+    incidents = db.query(Incident).order_by(Incident.created_at.desc()).limit(100).all()
+    
+    print(f"[POLICE] Found {len(incidents)} incidents")
+    
+    result = []
+    for incident in incidents:
+        worker = db.query(Worker).filter(Worker.id == incident.worker_id).first()
+        user = db.query(User).filter(User.id == worker.user_id).first() if worker else None
+        
+        result.append({
+            "id": incident.id,
+            "incident_number": incident.incident_number,
+            "worker_name": user.full_name if user else "Unknown",
+            "worker_id": worker.worker_id if worker else None,
+            "title": incident.title,
+            "description": incident.description,
+            "incident_type": incident.incident_type,
+            "severity": incident.severity,
+            "incident_date": incident.incident_date.isoformat() if incident.incident_date else None,
+            "location": incident.location,
+            "action_taken": incident.action_taken,
+            "created_at": incident.created_at.isoformat() if incident.created_at else None
+        })
+    
+    return {"incidents": result, "total": len(result)}
 
 
 @router.post("/incident")

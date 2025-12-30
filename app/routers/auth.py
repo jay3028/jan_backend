@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from datetime import datetime
 from app.database import get_db
-from app.models import User, UserRole
+from app.models import User, UserRole, PoliceOfficer
 from app.schemas import (
     SignupRequest, LoginRequest, OTPRequest, OTPVerify,
     TokenResponse, RefreshTokenRequest, UserResponse
@@ -181,6 +181,22 @@ async def signup(request: SignupRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
     print(f"[AUTH] User Created - ID: {user.id}, Email: {user.email}, Role: {user.role.value}")
+    
+    # Automatically create police officer profile if role is police
+    if user.role == UserRole.POLICE:
+        police_officer = PoliceOfficer(
+            user_id=user.id,
+            officer_id=f"OFF-{datetime.now().year}-{user.id:05d}",
+            station_code=f"PS{user.id:03d}",
+            station_name="Central Police Station",  # Default, can be updated later
+            district="District HQ",  # Default, can be updated later
+            state="Bihar",  # Default, can be updated later
+            rank="Inspector"  # Default rank
+        )
+        db.add(police_officer)
+        db.commit()
+        db.refresh(police_officer)
+        print(f"[AUTH] ✅ Police Officer Profile Created - Officer ID: {police_officer.officer_id}, Rank: {police_officer.rank}")
     
     # Create audit log
     create_audit_log(
