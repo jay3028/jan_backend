@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from app.database import get_db
 from app.models import (
     PoliceOfficer, PoliceVerification, Worker, Incident, User,
-    VerificationStatus, WorkerStatus
+    VerificationStatus, WorkerStatus, WorkerActivity
 )
 from app.schemas import (
     PoliceVerificationCreate, PoliceVerificationResponse,
@@ -17,6 +17,7 @@ from app.schemas import (
 from app.dependencies import get_current_user, get_current_police_officer, create_audit_log
 from app.services.face_verification import face_verification_service
 from app.services.qr_service import qr_service
+from app.services.aws_rekognition import rekognition_service
 from app.auth import generate_worker_id
 
 router = APIRouter(prefix="/police", tags=["Police"])
@@ -645,6 +646,30 @@ async def create_verification(
             worker.verification_endpoint = qr_service.generate_verification_endpoint(worker.worker_id)
             print(f"[POLICE] ✅ QR Code Generated for verified worker: {worker.worker_id}")
             print(f"[POLICE] QR Code Path: {worker.qr_code_url}")
+        
+        # Index face in AWS Rekognition ONLY when verified by police
+        if worker.selfie_url and rekognition_service.client:
+            print(f"[REKOGNITION] Indexing face for worker: {worker.worker_id}")
+            success, face_data, error = rekognition_service.index_face(
+                image_path=worker.selfie_url,
+                worker_id=worker.worker_id
+            )
+            
+            if success:
+                # Store face_id in worker record for future reference
+                if not worker.onboarding_data:
+                    worker.onboarding_data = {}
+                worker.onboarding_data['face_id'] = face_data['face_id']
+                worker.onboarding_data['face_confidence'] = face_data['confidence']
+                print(f"[REKOGNITION] ✅ Face indexed successfully. FaceID: {face_data['face_id']}")
+            else:
+                print(f"[REKOGNITION] ⚠️ Face indexing failed: {error}")
+                # Don't fail the verification if face indexing fails
+        else:
+            if not worker.selfie_url:
+                print(f"[REKOGNITION] ⚠️ No selfie found for worker, skipping face indexing")
+            elif not rekognition_service.client:
+                print(f"[REKOGNITION] ⚠️ AWS Rekognition not configured, skipping face indexing")
     elif data.status == VerificationStatus.REJECTED:
         worker.status = WorkerStatus.BLOCKED
     
@@ -813,5 +838,246 @@ async def suspend_worker(
     return {
         "success": True,
         "message": f"Worker {'suspended' if temporary else 'blocked'}"
+    }
+
+
+@router.get("/workers/{worker_id}/activities")
+async def get_worker_activities_by_police(
+    worker_id: int,
+    officer: PoliceOfficer = Depends(get_current_police_officer),
+    db: Session = Depends(get_db)
+):
+    """Get worker's activity history (last 2 weeks) - Police view"""
+    print(f"\n[POLICE] Activities requested for worker ID: {worker_id}, Officer: {officer.id}")
+    
+    # Get worker
+    worker = db.query(Worker).filter(Worker.id == worker_id).first()
+    
+    if not worker:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Worker not found"
+        )
+    
+    # Get activities from last 2 weeks
+    two_weeks_ago = datetime.now() - timedelta(days=14)
+    activities = db.query(WorkerActivity).filter(
+        WorkerActivity.worker_id == worker.id,
+        WorkerActivity.activity_date >= two_weeks_ago
+    ).order_by(WorkerActivity.activity_date.desc()).all()
+    
+    print(f"[POLICE] Found {len(activities)} activities for worker ID: {worker.id}")
+    
+    # Format activities based on type
+    result = []
+    for activity in activities:
+        activity_data = {
+            "id": activity.id,
+            "activity_type": activity.activity_type,
+            "activity_date": activity.activity_date.isoformat(),
+            "location": activity.location,
+            "city": activity.city,
+            "state": activity.state,
+            "pincode": activity.pincode,
+            "status": activity.status,
+            "notes": activity.notes
+        }
+        
+        # Add type-specific fields
+        if activity.activity_type == "delivery":
+            activity_data.update({
+                "package_id": activity.package_id,
+                "delivery_partner": activity.delivery_partner,
+                "package_type": activity.package_type,
+                "recipient_name": activity.recipient_name,
+                "recipient_contact": activity.recipient_contact
+            })
+        elif activity.activity_type == "transaction":
+            activity_data.update({
+                "customer_name": activity.customer_name,
+                "customer_contact": activity.customer_contact,
+                "transaction_type": activity.transaction_type,
+                "transaction_amount": activity.transaction_amount,
+                "bank_name": activity.bank_name
+            })
+        
+        result.append(activity_data)
+    
+    return {
+        "activities": result,
+        "total": len(result),
+        "worker_category": worker.category.value if worker.category else None,
+        "worker_id": worker.worker_id,
+        "worker_name": db.query(User).filter(User.id == worker.user_id).first().full_name if db.query(User).filter(User.id == worker.user_id).first() else "Unknown"
+    }
+
+
+@router.post("/face-search")
+async def search_worker_by_face(
+    data: dict,
+    officer: PoliceOfficer = Depends(get_current_police_officer),
+    db: Session = Depends(get_db)
+):
+    """
+    Search for workers by face (Police only)
+    
+    Police can upload a photo and find matching workers in the system.
+    This helps identify workers during patrol or verification.
+    
+    Request body:
+    {
+        "image": "base64_encoded_image",
+        "threshold": 80.0,  // Optional, default 80%
+        "max_results": 5    // Optional, default 5
+    }
+    """
+    print(f"\n[FACE-SEARCH] Request from officer ID: {officer.id}")
+    
+    # Check if Rekognition is configured
+    if not rekognition_service.client:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Face recognition service is not configured. Please contact administrator."
+        )
+    
+    # Get parameters
+    base64_image = data.get("image")
+    threshold = data.get("threshold", 80.0)
+    max_results = data.get("max_results", 5)
+    
+    if not base64_image:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Image data is required"
+        )
+    
+    # Validate threshold
+    if not (0 <= threshold <= 100):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Threshold must be between 0 and 100"
+        )
+    
+    # Search for matching faces
+    print(f"[FACE-SEARCH] Searching with threshold: {threshold}%")
+    success, matches, error = rekognition_service.search_face_by_base64(
+        base64_image=base64_image,
+        threshold=threshold,
+        max_faces=max_results
+    )
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=error or "Face search failed"
+        )
+    
+    # If no matches found
+    if not matches:
+        print(f"[FACE-SEARCH] No matches found")
+        return {
+            "success": True,
+            "matches": [],
+            "total": 0,
+            "message": "No matching workers found in the database"
+        }
+    
+    # Get worker details for each match
+    results = []
+    for match in matches:
+        worker_id = match['worker_id']
+        
+        # Find worker by worker_id (official ID like IND-WRK-DLV-2025-000001)
+        worker = db.query(Worker).filter(Worker.worker_id == worker_id).first()
+        
+        if worker:
+            # Get user details
+            user = db.query(User).filter(User.id == worker.user_id).first()
+            
+            results.append({
+                "worker_internal_id": worker.id,
+                "worker_id": worker.worker_id,
+                "full_name": user.full_name if user else "Unknown",
+                "mobile_number": user.mobile_number if user else "Unknown",
+                "category": worker.category.value if worker.category else "Unknown",
+                "verification_status": worker.verification_status.value if worker.verification_status else "Unknown",
+                "status": worker.status.value if worker.status else "Unknown",
+                "city": worker.city,
+                "state": worker.state,
+                "selfie_url": worker.selfie_url,
+                "qr_code_url": worker.qr_code_url,
+                "similarity": round(match['similarity'], 2),
+                "confidence": round(match['confidence'], 2),
+                "face_id": match['face_id']
+            })
+        else:
+            # Worker not found in database (face might be orphaned)
+            results.append({
+                "worker_id": worker_id,
+                "similarity": round(match['similarity'], 2),
+                "confidence": round(match['confidence'], 2),
+                "face_id": match['face_id'],
+                "error": "Worker record not found in database"
+            })
+    
+    print(f"[FACE-SEARCH] ✓ Found {len(results)} matches")
+    
+    # Log face search in audit
+    create_audit_log(
+        user_id=officer.user_id,
+        action="face_search",
+        resource_type="worker",
+        resource_id=None,
+        details={
+            "matches_found": len(results),
+            "threshold": threshold,
+            "top_match": results[0]['worker_id'] if results else None,
+            "top_similarity": results[0]['similarity'] if results else None
+        },
+        db=db
+    )
+    
+    return {
+        "success": True,
+        "matches": results,
+        "total": len(results),
+        "threshold_used": threshold
+    }
+
+
+@router.get("/rekognition/stats")
+async def get_rekognition_stats(
+    officer: PoliceOfficer = Depends(get_current_police_officer),
+    db: Session = Depends(get_db)
+):
+    """Get AWS Rekognition collection statistics (Police only)"""
+    print(f"\n[REKOGNITION] Stats requested by officer ID: {officer.id}")
+    
+    if not rekognition_service.client:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Face recognition service is not configured"
+        )
+    
+    stats = rekognition_service.get_collection_stats()
+    
+    if not stats:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve collection statistics"
+        )
+    
+    # Get total workers in database
+    total_workers = db.query(Worker).filter(
+        Worker.verification_status == VerificationStatus.VERIFIED
+    ).count()
+    
+    return {
+        "collection_id": rekognition_service.collection_id,
+        "faces_indexed": stats['face_count'],
+        "verified_workers": total_workers,
+        "collection_arn": stats['collection_arn'],
+        "created_at": stats['created_timestamp'].isoformat() if stats.get('created_timestamp') else None,
+        "aws_region": rekognition_service.aws_region
     }
 

@@ -386,6 +386,48 @@ class AuditLog(Base):
     user = relationship("User", back_populates="audit_logs")
 
 
+class WorkerActivity(Base):
+    """Track worker activities - Deliveries or Customer Transactions"""
+    __tablename__ = "worker_activities"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    worker_id = Column(Integer, ForeignKey("workers.id"))
+    
+    # Activity type based on worker category
+    activity_type = Column(String(50))  # "delivery" or "transaction"
+    
+    # Common fields
+    activity_date = Column(DateTime(timezone=True), server_default=func.now())
+    location = Column(String(500))  # Address or location
+    city = Column(String(100))
+    state = Column(String(100))
+    pincode = Column(String(10), nullable=True)
+    
+    # Delivery specific (for delivery_worker)
+    package_id = Column(String(100), nullable=True)
+    delivery_partner = Column(String(100), nullable=True)  # Company name
+    package_type = Column(String(100), nullable=True)  # Document, Electronics, etc.
+    recipient_name = Column(String(255), nullable=True)
+    recipient_contact = Column(String(20), nullable=True)
+    
+    # Transaction specific (for aeps_agent)
+    customer_name = Column(String(255), nullable=True)
+    customer_contact = Column(String(20), nullable=True)
+    transaction_type = Column(String(50), nullable=True)  # Cash Withdrawal, Balance Inquiry, etc.
+    transaction_amount = Column(Float, nullable=True)
+    bank_name = Column(String(255), nullable=True)
+    
+    # Status
+    status = Column(String(50), default="completed")  # completed, pending, failed
+    notes = Column(Text, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    worker = relationship("Worker")
+
+
 class SystemConfig(Base):
     """System configuration and settings"""
     __tablename__ = "system_config"

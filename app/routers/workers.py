@@ -3,13 +3,13 @@ Worker onboarding and management routes
 """
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timedelta
 import base64
 import os
 import uuid
 from pathlib import Path
 from app.database import get_db
-from app.models import Worker, WorkerCategory, WorkerStatus, VerificationStatus, User
+from app.models import Worker, WorkerCategory, WorkerStatus, VerificationStatus, User, WorkerActivity
 from app.schemas import (
     WorkerOnboardingStep1, WorkerOnboardingStep2, WorkerOnboardingStep3,
     WorkerOnboardingStep4, WorkerOnboardingStep5, WorkerOnboardingStep6,
@@ -730,4 +730,73 @@ async def update_worker_profile(
     db.commit()
     
     return {"success": True, "message": "Profile updated"}
+
+
+@router.get("/activities")
+async def get_worker_activities(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get worker's activity history (last 2 weeks)"""
+    print(f"\n[WORKER] Activities requested - User ID: {current_user.id}")
+    
+    # Get worker profile
+    worker = db.query(Worker).filter(Worker.user_id == current_user.id).first()
+    
+    if not worker:
+        return {
+            "activities": [],
+            "total": 0,
+            "message": "No worker profile found"
+        }
+    
+    # Get activities from last 2 weeks
+    two_weeks_ago = datetime.now() - timedelta(days=14)
+    activities = db.query(WorkerActivity).filter(
+        WorkerActivity.worker_id == worker.id,
+        WorkerActivity.activity_date >= two_weeks_ago
+    ).order_by(WorkerActivity.activity_date.desc()).all()
+    
+    print(f"[WORKER] Found {len(activities)} activities for worker ID: {worker.id}")
+    
+    # Format activities based on type
+    result = []
+    for activity in activities:
+        activity_data = {
+            "id": activity.id,
+            "activity_type": activity.activity_type,
+            "activity_date": activity.activity_date.isoformat(),
+            "location": activity.location,
+            "city": activity.city,
+            "state": activity.state,
+            "pincode": activity.pincode,
+            "status": activity.status,
+            "notes": activity.notes
+        }
+        
+        # Add type-specific fields
+        if activity.activity_type == "delivery":
+            activity_data.update({
+                "package_id": activity.package_id,
+                "delivery_partner": activity.delivery_partner,
+                "package_type": activity.package_type,
+                "recipient_name": activity.recipient_name,
+                "recipient_contact": activity.recipient_contact
+            })
+        elif activity.activity_type == "transaction":
+            activity_data.update({
+                "customer_name": activity.customer_name,
+                "customer_contact": activity.customer_contact,
+                "transaction_type": activity.transaction_type,
+                "transaction_amount": activity.transaction_amount,
+                "bank_name": activity.bank_name
+            })
+        
+        result.append(activity_data)
+    
+    return {
+        "activities": result,
+        "total": len(result),
+        "worker_category": worker.category.value if worker.category else None
+    }
 
