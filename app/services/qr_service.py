@@ -4,11 +4,13 @@ QR Code generation service
 import qrcode
 from pathlib import Path
 from typing import Optional
+import os
 
 
 class QRCodeService:
-    def __init__(self, base_url: str = "https://jansuraksha.gov.in"):
-        self.base_url = base_url
+    def __init__(self):
+        # Use environment variable or default to localhost for development
+        self.base_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
         # Create QR codes directory
         self.qr_dir = Path("uploads/qrcodes")
         self.qr_dir.mkdir(parents=True, exist_ok=True)
@@ -18,7 +20,7 @@ class QRCodeService:
         Generate QR code for worker verification
         Saves to file and returns file path
         """
-        # Create verification URL
+        # Create verification URL - points to frontend verify page
         verification_url = f"{self.base_url}/verify?id={worker_id}"
         
         # Generate QR code
@@ -44,7 +46,9 @@ class QRCodeService:
     
     def generate_verification_endpoint(self, worker_id: str) -> str:
         """Generate public verification endpoint URL"""
-        return f"{self.base_url}/api/verify/worker/{worker_id}"
+        # Backend API endpoint for verification
+        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+        return f"{backend_url}/api/verify/worker/{worker_id}"
 
 
 qr_service = QRCodeService()

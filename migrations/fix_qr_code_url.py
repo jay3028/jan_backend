@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.models import Worker, VerificationStatus
-from app.database import SQLALCHEMY_DATABASE_URL
+from app.database import DATABASE_URL
 from pathlib import Path
 
 def fix_qr_code_urls():
@@ -20,7 +20,7 @@ def fix_qr_code_urls():
     print("="*60 + "\n")
     
     # Create database session
-    engine = create_engine(SQLALCHEMY_DATABASE_URL)
+    engine = create_engine(DATABASE_URL)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     db = SessionLocal()
     

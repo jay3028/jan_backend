@@ -22,6 +22,58 @@ from app.auth import generate_worker_id
 router = APIRouter(prefix="/police", tags=["Police"])
 
 
+@router.post("/regenerate-qr/{worker_id}")
+async def regenerate_qr_code(
+    worker_id: int,
+    officer: PoliceOfficer = Depends(get_current_police_officer),
+    db: Session = Depends(get_db)
+):
+    """Regenerate QR code for a verified worker (if missing)"""
+    print(f"\n[POLICE] QR Code regeneration requested by officer ID: {officer.id} for worker: {worker_id}")
+    
+    worker = db.query(Worker).filter(Worker.id == worker_id).first()
+    
+    if not worker:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Worker not found"
+        )
+    
+    if worker.verification_status != VerificationStatus.VERIFIED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Worker must be verified before generating QR code"
+        )
+    
+    if not worker.worker_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Worker ID not assigned yet"
+        )
+    
+    # Regenerate QR code (even if already exists)
+    try:
+        worker.qr_code_url = qr_service.generate_worker_qr(worker.worker_id)
+        worker.verification_endpoint = qr_service.generate_verification_endpoint(worker.worker_id)
+        db.commit()
+        
+        print(f"[POLICE] ✅ QR Code Regenerated for worker: {worker.worker_id}")
+        print(f"[POLICE] QR Code Path: {worker.qr_code_url}")
+        
+        return {
+            "success": True,
+            "message": "QR code generated successfully",
+            "worker_id": worker.worker_id,
+            "qr_code_url": worker.qr_code_url
+        }
+    except Exception as e:
+        print(f"[POLICE] ✗ Error generating QR code: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate QR code: {str(e)}"
+        )
+
+
 @router.get("/stats")
 @router.get("/statistics")
 async def get_police_statistics(
@@ -356,6 +408,9 @@ async def get_worker_by_internal_id(
         "onboarding_step": worker.onboarding_step,
         "onboarding_data": worker.onboarding_data,
         "submitted_at": worker.updated_at.isoformat() if worker.updated_at else worker.created_at.isoformat(),
+        # QR Code and Verification - ADDED
+        "qr_code_url": worker.qr_code_url if worker.verification_status == VerificationStatus.VERIFIED else None,
+        "verification_endpoint": worker.verification_endpoint if worker.verification_status == VerificationStatus.VERIFIED else None,
         # AePS specific fields
         "bank_affiliation": worker.bank_affiliation,
         "bc_affiliation": worker.bc_affiliation,
